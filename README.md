@@ -42,3 +42,15 @@ python -m SimpleHTTPServer
 ```
 ./bin/proxy-test-client --caCert=certs/issued/ca.crt --clientCert=certs/issued/proxy-client.crt --clientKey=certs/private/proxy-client.key
 ```
+
+## Troubleshoot
+
+### Undefined ProtoPackageIsVersion3
+As explained in https://github.com/golang/protobuf/issues/763#issuecomment-442767135,
+protoc-gen-go binary has to be built from the vendored version:
+
+```console
+go install ./vendor/github.com/golang/protobuf/protoc-gen-go
+make gen
+```
+
