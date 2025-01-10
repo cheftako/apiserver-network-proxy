@@ -99,6 +99,7 @@ func (a *Agent) Run(o *options.GrpcProxyAgentOptions, drainCh, stopCh <-chan str
 	defer a.adminServer.Close()
 
 	<-stopCh
+
 	klog.V(1).Infoln("Shutting down agent.")
 
 	return nil

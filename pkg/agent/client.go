@@ -538,10 +538,19 @@ func (a *Client) remoteToProxy(connID int64, eConn *endpointConn) {
 	}
 
 	for {
+		select {
+		case <-a.stopCh:
+			return
+		default:
+		}
+		timeout := time.Now().Add(15 * time.Second)
+		eConn.conn.SetReadDeadline(timeout)
 		n, err := eConn.conn.Read(buf[:])
 		klog.V(5).InfoS("received data from remote", "bytes", n, "connectionID", connID)
 
-		if err == io.EOF {
+		if err == os.ErrDeadlineExceeded {
+			continue
+		} else if err == io.EOF {
 			klog.V(2).InfoS("remote connection EOF", "connectionID", connID)
 			return
 		} else if err != nil {
