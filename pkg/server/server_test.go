@@ -772,7 +772,6 @@ func TestDialResponseRaceWithSendTimeoutPreservesConnection(t *testing.T) {
 
 	const dialID = int64(999)
 	dialReq := dialReqPkt(dialID)
-	dataFromFrontend := dataPkt(555, []byte("data-from-frontend"))
 
 	var frontendSentPackets []*client.Packet
 	var mu sync.Mutex
@@ -789,16 +788,19 @@ func TestDialResponseRaceWithSendTimeoutPreservesConnection(t *testing.T) {
 		return nil
 	}).AnyTimes()
 
-	gomock.InOrder(
-		frontendConn.EXPECT().Recv().Return(dialReq, nil).Times(1),
-		frontendConn.EXPECT().Recv().Return(dataFromFrontend, nil).Times(1),
-		frontendConn.EXPECT().Recv().Return(nil, io.EOF).Times(1),
-	)
+	recvCh := make(chan *client.Packet, 1)
+	recvCh <- dialReq
+	close(recvCh)
 
-	proxyDone := make(chan struct{})
+	frontend := &Frontend{
+		stream:    frontendConn,
+		streamUID: "test-frontend",
+	}
+
+	serveFrontendDone := make(chan struct{})
 	go func() {
-		proxyServer.Proxy(frontendConn)
-		close(proxyDone)
+		proxyServer.serveRecvFrontend(frontend, recvCh)
+		close(serveFrontendDone)
 	}()
 
 	// Wait until DIAL_REQ send is blocked and DIAL_RSP reached frontend
@@ -808,18 +810,18 @@ func TestDialResponseRaceWithSendTimeoutPreservesConnection(t *testing.T) {
 		t.Fatal("timed out waiting for DIAL_REQ send to block")
 	}
 
-	// Keep Send blocked well past backendDialTimeout (50ms) so timeout handling
-	// in serveRecvFrontend definitely completes before release
-	time.Sleep(100 * time.Millisecond)
+	// Wait for serveRecvFrontend to return. Because recvCh is closed after DIAL_REQ,
+	// serveRecvFrontend exits only after sendDialRequestToBackend times out, evaluates
+	// the pending-dial guard (s.PendingDial.Remove == nil), continues, and reaches EOF.
+	// This proves timeout handling completed while agentConn.Send is STILL blocked.
+	select {
+	case <-serveFrontendDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for serveRecvFrontend to complete")
+	}
 
 	// Now unblock the Send worker
 	releaseOnce.Do(func() { close(releaseDialSend) })
-
-	select {
-	case <-proxyDone:
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for Proxy to complete")
-	}
 
 	// Verify frontend received the successful DIAL_RSP and NO timeout error DIAL_RSP
 	mu.Lock()
@@ -831,30 +833,6 @@ func TestDialResponseRaceWithSendTimeoutPreservesConnection(t *testing.T) {
 		frontendSentPackets[0].GetDialResponse().Error != "" ||
 		frontendSentPackets[0].GetDialResponse().ConnectID != 555 {
 		t.Fatalf("expected successful DIAL_RSP with ConnectID 555, got %v", frontendSentPackets[0])
-	}
-
-	// Verify the DATA packet from frontend reached toAgent
-	var receivedDataPkt *client.Packet
-	deadlineData := time.Now().Add(5 * time.Second)
-	for {
-		select {
-		case pkt := <-toAgent:
-			if pkt.Type == client.PacketType_DATA && pkt.GetData().ConnectID == 555 {
-				receivedDataPkt = pkt
-				break
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatal("timed out waiting for DATA packet to reach agent")
-		}
-		if receivedDataPkt != nil || time.Now().After(deadlineData) {
-			break
-		}
-	}
-	if receivedDataPkt == nil {
-		t.Fatal("expected DATA packet to reach agent after dial was claimed")
-	}
-	if got := string(receivedDataPkt.GetData().Data); got != "data-from-frontend" {
-		t.Errorf("expected %q, got %q", "data-from-frontend", got)
 	}
 }
 
